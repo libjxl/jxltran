@@ -86,6 +86,15 @@ struct HeaderMod {
   uint32_t main_exp_bits = 0;
 
   std::vector<ExtraChannelHeaderPatch> extra_channel_patches;
+  bool set_transfer = false;
+  uint32_t transfer_function = 13;
+  bool set_white_point = false;
+  uint32_t white_point = 1;
+  bool set_primaries = false;
+  uint32_t primaries = 1;
+  bool set_rendering_intent = false;
+  uint32_t rendering_intent = 1;
+  bool strip_icc = false;
 };
 
 // Applies header-only modifications to |cs| (image header fields).

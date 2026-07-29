@@ -245,6 +245,44 @@ bool ApplyHeaderMod(ParsedCodestream* cs, const HeaderMod& mod) {
     m->all_default = false;
   }
 
+  if (mod.strip_icc) {
+    m->colour_encoding.want_icc = false;
+    m->all_default = false;
+  }
+
+  if (mod.set_transfer) {
+    m->colour_encoding.tf.have_gamma = false;
+    m->colour_encoding.tf.gamma = 0;
+    m->colour_encoding.tf.transfer_function = mod.transfer_function;
+    m->all_default = false;
+  }
+
+
+  if (mod.set_white_point) {
+    m->colour_encoding.white_point = static_cast<WhitePoint>(mod.white_point);
+    m->all_default = false;
+  }
+
+  if (mod.set_primaries) {
+    m->colour_encoding.primaries = static_cast<Primaries>(mod.primaries);
+    m->all_default = false;
+  }
+
+  if (mod.set_rendering_intent) {
+    m->colour_encoding.rendering_intent = static_cast<RenderingIntent>(mod.rendering_intent);
+    m->all_default = false;
+  }
+  if (mod.strip_icc || mod.set_transfer || mod.set_white_point || mod.set_primaries || mod.set_rendering_intent) {
+    if (!m->colour_encoding.want_icc &&
+        m->colour_encoding.colour_space == ColourSpace::kRGB &&
+        m->colour_encoding.white_point == WhitePoint::kD65 &&
+        m->colour_encoding.primaries == Primaries::kSRGB &&
+        !m->colour_encoding.tf.have_gamma &&
+        m->colour_encoding.tf.transfer_function == 13 &&
+        m->colour_encoding.rendering_intent == RenderingIntent::kRelative) {
+      m->all_default = true;
+    }
+  }
   return true;
 }
 
