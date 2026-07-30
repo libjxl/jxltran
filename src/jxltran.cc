@@ -2000,6 +2000,89 @@ static bool ParseOneExtraChannelPatch(const char* spec,
   return true;
 }
 
+struct SetTransferArg {
+  bool set = false;
+  uint32_t transfer_function = 13;
+};
+
+bool ParseSetTransferOpt(const char* arg, SetTransferArg* out) {
+  SetTransferArg* p = out;
+  std::string s = arg;
+  for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (s == "709") p->transfer_function = 1;
+  else if (s == "unknown") p->transfer_function = 2;
+  else if (s == "linear") p->transfer_function = 8;
+  else if (s == "srgb") p->transfer_function = 13;
+  else if (s == "pq") p->transfer_function = 16;
+  else if (s == "dci") p->transfer_function = 17;
+  else if (s == "hlg") p->transfer_function = 18;
+  else {
+    fprintf(stderr,
+            "jxltran: --set-transfer: invalid transfer function '%s'. Valid "
+            "values: 709, unknown, linear, srgb, pq, dci, hlg.\n",
+            arg);
+    return false;
+  }
+  p->set = true;
+  return true;
+}
+
+
+struct SetWhitePointArg {
+  bool set = false;
+  uint32_t white_point = 1;
+};
+bool ParseSetWhitePointOpt(const char* arg, SetWhitePointArg* out) {
+  std::string s = arg;
+  for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (s == "d65") out->white_point = 1;
+  else if (s == "e") out->white_point = 10;
+  else if (s == "dci") out->white_point = 11;
+  else {
+    fprintf(stderr, "jxltran: --set-white-point: invalid value '%s'. Valid: d65, e, dci.\n", arg);
+    return false;
+  }
+  out->set = true;
+  return true;
+}
+
+struct SetPrimariesArg {
+  bool set = false;
+  uint32_t primaries = 1;
+};
+bool ParseSetPrimariesOpt(const char* arg, SetPrimariesArg* out) {
+  std::string s = arg;
+  for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (s == "srgb") out->primaries = 1;
+  else if (s == "2100") out->primaries = 9;
+  else if (s == "p3") out->primaries = 11;
+  else {
+    fprintf(stderr, "jxltran: --set-primaries: invalid value '%s'. Valid: srgb, 2100, p3.\n", arg);
+    return false;
+  }
+  out->set = true;
+  return true;
+}
+
+struct SetRenderingIntentArg {
+  bool set = false;
+  uint32_t rendering_intent = 1;
+};
+bool ParseSetRenderingIntentOpt(const char* arg, SetRenderingIntentArg* out) {
+  std::string s = arg;
+  for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (s == "perceptual") out->rendering_intent = 0;
+  else if (s == "relative") out->rendering_intent = 1;
+  else if (s == "saturation") out->rendering_intent = 2;
+  else if (s == "absolute") out->rendering_intent = 3;
+  else {
+    fprintf(stderr, "jxltran: --set-rendering-intent: invalid value '%s'. Valid: perceptual, relative, saturation, absolute.\n", arg);
+    return false;
+  }
+  out->set = true;
+  return true;
+}
+
 struct Args {
   const char* file_in = nullptr;
   const char* file_out = nullptr;
@@ -2068,6 +2151,11 @@ struct Args {
   const char* append_jxl = nullptr;
   bool append_jxl_skip_compat_check = false;
   bool append_dummy_tail = false;
+  bool strip_icc = false;
+  SetTransferArg set_transfer;
+  SetWhitePointArg set_white_point;
+  SetPrimariesArg set_primaries;
+  SetRenderingIntentArg set_rendering_intent;
 
   int GabOptionCount() const {
     return (gab_blur != nullptr) + (gab_sharpen != nullptr) +
@@ -2078,7 +2166,9 @@ struct Args {
     return set_orientation != 0 || rel_orientation != 0 ||
            set_bits_per_sample != 0 || main_float.set || main_exp.set ||
            num_loops.set || tps.set ||
-           intensity_target.set || !set_extra_channel_specs.empty();
+           intensity_target.set || !set_extra_channel_specs.empty() ||
+           set_transfer.set || strip_icc ||
+           set_white_point.set || set_primaries.set || set_rendering_intent.set;
   }
 
   bool NeedsOpsinSliderArgs() const {
@@ -2409,6 +2499,35 @@ struct Args {
         '\0', "opsin-quant-bias-3", "D",
         "XYB only: add a delta to quant_biases[3] (about −2..+2).",
         &opsin_quant_bias_3, ParseOpsinQuantBias3Opt);
+    cmdline->AddOptionValue(
+        '\0', "set-transfer", "TF",
+        "Force a specific transfer curve in ColourEncoding (discards custom gamma).\n"
+        "    Requires --strip-icc if the image has an embedded ICC profile.\n"
+        "    Valid values: 709, unknown, linear, srgb, pq, dci, hlg.",
+        &set_transfer, ParseSetTransferOpt);
+    cmdline->AddOptionFlag(
+        '\0', "strip-icc",
+        "Remove embedded ICC profile if present (forces use of color encoding enums).",
+        &strip_icc, &jpegxl::tools::SetBooleanTrue);
+
+    cmdline->AddOptionValue(
+        '\0', "set-white-point", "WP",
+        "Force a specific white point in ColourEncoding.\n"
+        "    Requires --strip-icc if the image has an embedded ICC profile.\n"
+        "    Valid values: d65, e, dci.",
+        &set_white_point, ParseSetWhitePointOpt);
+    cmdline->AddOptionValue(
+        '\0', "set-primaries", "PR",
+        "Force specific primaries in ColourEncoding.\n"
+        "    Requires --strip-icc if the image has an embedded ICC profile.\n"
+        "    Valid values: srgb, 2100, p3.",
+        &set_primaries, ParseSetPrimariesOpt);
+    cmdline->AddOptionValue(
+        '\0', "set-rendering-intent", "RI",
+        "Force a specific rendering intent in ColourEncoding.\n"
+        "    Requires --strip-icc if the image has an embedded ICC profile.\n"
+        "    Valid values: perceptual, relative, saturation, absolute.",
+        &set_rendering_intent, ParseSetRenderingIntentOpt);
     cmdline->AddOptionFlag(
         '\0', "opsin-inverse",
         "XYB only: apply the exact inverse of a prior opsin slider pass. Use the "
@@ -3657,6 +3776,25 @@ int main(int argc, const char* argv[]) {
           undo_rec.NoteExtraChannelHeaderBeforeApply(parsed,
                                                      mod.extra_channel_patches);
         }
+
+        bool changing_color_enums = args.set_transfer.set ||
+                                    args.set_white_point.set || args.set_primaries.set ||
+                                    args.set_rendering_intent.set;
+
+        if (changing_color_enums && parsed.image.metadata.colour_encoding.want_icc && !args.strip_icc) {
+          fprintf(stderr, "jxltran: Cannot set color encoding enums because the image uses an ICC profile. Use --strip-icc if you want to replace the ICC profile with standard color encoding.\n");
+          return false;
+        }
+
+        mod.strip_icc = args.strip_icc;
+        mod.set_transfer = args.set_transfer.set;
+        mod.transfer_function = args.set_transfer.transfer_function;
+        mod.set_white_point = args.set_white_point.set;
+        mod.white_point = args.set_white_point.white_point;
+        mod.set_primaries = args.set_primaries.set;
+        mod.primaries = args.set_primaries.primaries;
+        mod.set_rendering_intent = args.set_rendering_intent.set;
+        mod.rendering_intent = args.set_rendering_intent.rendering_intent;
         if (!jxltran::ApplyHeaderMod(&parsed, mod)) return false;
       }
       if (args.file_out) {
@@ -3664,8 +3802,16 @@ int main(int argc, const char* argv[]) {
             args.set_orientation != 0 || args.rel_orientation != 0 ||
             args.set_bits_per_sample != 0 || args.main_float.set ||
             args.main_exp.set || args.num_loops.set ||
-            args.tps.set || args.intensity_target.set;
+            args.tps.set || args.intensity_target.set ||
+            args.set_transfer.set || args.strip_icc ||
+            args.set_white_point.set || args.set_primaries.set || args.set_rendering_intent.set;
         if (hdr_undo_fields) {
+          bool color_enums_changed = args.set_transfer.set ||
+                                     args.set_white_point.set || args.set_primaries.set ||
+                                     args.set_rendering_intent.set;
+          if (color_enums_changed || args.strip_icc) {
+            undo_rec.SetCodestreamNotReversible("Color encoding modification (undo not emitted)");
+          }
           uint32_t orient_after = parsed.image.metadata.orientation;
           if (orient_after < 1 || orient_after > 8) orient_after = 1;
           undo_rec.NoteHeaderChanges(

@@ -92,6 +92,11 @@ Fields in the **image header** (and related metadata-only canvas changes): orien
 | `--set-main-float` | `0` or `1` | Set image-header `float_sample` for the main channel (`0` = integer, `1` = float). |
 | `--set-main-exp` | `2`–`8` | Exponent bits for float main samples (meaningful with `--set-main-float=1` or when the file is already float). |
 | `--set-extra-channel` | `INDEX:key=val,...` | Edit **ExtraChannelInfo** for extra channel `INDEX` (`0`…`num_extra−1`). **`dim_shift`** and the number of extra channels are fixed. Keys: `d_alpha` (`0`/`1`), `type` (slug: `alpha`, `spot`, `depth`, `black`, `cfa`, `thermal`, `optional`, `unknown`), `bits`, `float`, `exp`, `assoc` / `alpha_associated`, `name_hex`, `cfa`, `spot_r` / `spot_g` / `spot_b` / `spot_solidity` / `spot_a`. Repeat the option for multiple channels. **`--info`** prints one `extra_channel:` line per channel. |
+| `--set-white-point` | `WP` | Force a specific white point in ColourEncoding. Valid values: `d65`, `e`, `dci`. Requires `--strip-icc` if the image has an embedded ICC profile. |
+| `--set-primaries` | `PR` | Force specific primaries in ColourEncoding. Valid values: `srgb`, `2100`, `p3`. Requires `--strip-icc` if the image has an embedded ICC profile. |
+| `--set-transfer` | `TF` | Force a specific transfer curve in ColourEncoding (discards custom gamma). Valid values: `709`, `unknown`, `linear`, `srgb`, `pq`, `dci`, `hlg`. Requires `--strip-icc` if the image has an embedded ICC profile. |
+| `--set-rendering-intent` | `RI` | Force a specific rendering intent in ColourEncoding. Valid values: `perceptual`, `relative`, `saturation`, `absolute`. Requires `--strip-icc` if the image has an embedded ICC profile. |
+| `--strip-icc` | | Remove embedded ICC profile if present, forcing the decoder to use the explicit color encoding enums. |
 | `--set-num-loops` | `N` | Animation loop count (`0` = infinite); animated images only. |
 | `--set-tps` | `N`, `N/D`, or `P%` | Ticks per second (`P%` scales the file’s current TPS); animated images only. |
 | `--opsin-exposure` | `EV` | XYB only: exposure in stops (linear RGB after XYB→RGB). |
