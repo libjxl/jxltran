@@ -29,6 +29,7 @@
 #include "frame_header.h"
 #include "image_header.h"
 #include "operations.h"
+#include "photon_noise.h"
 #include "reversible_undo.h"
 #include "opsin_adjust.h"
 #include "orientation_compose.h"
@@ -1113,6 +1114,11 @@ struct SetFrameNamesArg {
   std::vector<std::pair<size_t, std::vector<uint8_t>>> pairs;
 };
 
+struct SetFrameTypesArg {
+  bool set = false;
+  std::vector<jxltran::FrameTypeChange> pairs;
+};
+
 struct SetFrameRegionsArg {
   bool set = false;
   std::vector<std::pair<size_t, CropArg>> pairs;
@@ -1379,6 +1385,134 @@ static bool ApplyBlendOverrideKeyVal(jxltran::FrameBlendOverride* o,
           "clamp=, source=, target=)\n",
           key.c_str());
   return false;
+}
+
+static bool ParseSetFrameTypesArg(const char* s, SetFrameTypesArg* out) {
+  out->set = true;
+  out->pairs.clear();
+  if (s == nullptr || s[0] == '\0') {
+    fprintf(stderr,
+            "jxltran: --set-frame-types expects INDEX:TYPE pairs "
+            "(comma-separated); TYPE is regular, ref_only, or skip_prog\n");
+    return false;
+  }
+  const char* p = s;
+  while (*p != '\0') {
+    while (*p == ' ' || *p == '\t') ++p;
+    if (*p == '\0') break;
+    char* end = nullptr;
+    unsigned long fi = strtoul(p, &end, 10);
+    if (end == p) {
+      fprintf(stderr,
+              "jxltran: --set-frame-types: expected frame index near '%s'\n", p);
+      return false;
+    }
+    p = end;
+    while (*p == ' ' || *p == '\t') ++p;
+    if (*p != ':') {
+      fprintf(stderr,
+              "jxltran: --set-frame-types: expected ':' after frame index near "
+              "'%s'\n", p);
+      return false;
+    }
+    ++p;
+    while (*p == ' ' || *p == '\t') ++p;
+    uint32_t new_type;
+    // A slug ends at end-of-string, the next pair, or a ':' field suffix.
+    const auto slug_is = [&](const char* name, size_t n) {
+      return strncmp(p, name, n) == 0 &&
+             (p[n] == '\0' || p[n] == ',' || p[n] == ':');
+    };
+    if (slug_is("regular", 7)) {
+      new_type = jxltran::kFrameTypeRegular;
+      p += 7;
+    } else if (slug_is("ref_only", 8)) {
+      new_type = jxltran::kFrameTypeReferenceOnly;
+      p += 8;
+    } else if (slug_is("skip_prog", 9)) {
+      new_type = jxltran::kFrameTypeSkipProgressive;
+      p += 9;
+    } else if (slug_is("lf", 2)) {
+      fprintf(stderr,
+              "jxltran: --set-frame-types: 'lf' conversions are not supported "
+              "(different TOC structure)\n");
+      return false;
+    } else {
+      fprintf(stderr,
+              "jxltran: --set-frame-types: unknown type near '%s' "
+              "(use regular, ref_only, or skip_prog)\n", p);
+      return false;
+    }
+    jxltran::FrameTypeChange ch;
+    ch.frame_index = static_cast<size_t>(fi);
+    ch.new_type = new_type;
+    // Optional ":key=value" header fields (emitted by undo commands).
+    while (*p == ':') {
+      ++p;
+      const char* kb = p;
+      while (*p != '\0' && *p != '=' && *p != ',' && *p != ':') ++p;
+      const std::string key(kb, static_cast<size_t>(p - kb));
+      if (*p != '=') {
+        fprintf(stderr,
+                "jxltran: --set-frame-types: expected KEY=VALUE after ':' "
+                "near '%s'\n",
+                kb);
+        return false;
+      }
+      ++p;
+      char* vend = nullptr;
+      const long long v = strtoll(p, &vend, 10);
+      if (vend == p) {
+        fprintf(stderr,
+                "jxltran: --set-frame-types: %s= expects an integer\n",
+                key.c_str());
+        return false;
+      }
+      p = vend;
+      if (key == "last") {
+        ch.has_is_last = true;
+        ch.is_last = (v != 0);
+      } else if (key == "sbct") {
+        ch.has_save_before_ct = true;
+        ch.save_before_ct = (v != 0);
+      } else if (key == "blend") {
+        ch.has_blend_mode = true;
+        ch.blend_mode = static_cast<uint32_t>(v);
+      } else if (key == "src") {
+        ch.has_blend_source = true;
+        ch.blend_source = static_cast<uint32_t>(v);
+      } else if (key == "alpha") {
+        ch.has_alpha_channel = true;
+        ch.alpha_channel = static_cast<uint32_t>(v);
+      } else if (key == "clamp") {
+        ch.has_clamp = true;
+        ch.clamp = (v != 0);
+      } else if (key == "dur") {
+        ch.has_duration = true;
+        ch.duration = static_cast<uint32_t>(v);
+      } else if (key == "x0") {
+        ch.has_origin = true;
+        ch.x0 = static_cast<int32_t>(v);
+      } else if (key == "y0") {
+        ch.has_origin = true;
+        ch.y0 = static_cast<int32_t>(v);
+      } else {
+        fprintf(stderr,
+                "jxltran: --set-frame-types: unknown field '%s' (use last, "
+                "sbct, blend, src, alpha, clamp, dur, x0, y0)\n",
+                key.c_str());
+        return false;
+      }
+    }
+    out->pairs.push_back(ch);
+    while (*p == ' ' || *p == '\t') ++p;
+    if (*p == ',') ++p;
+  }
+  if (out->pairs.empty()) {
+    fprintf(stderr, "jxltran: --set-frame-types needs at least one entry\n");
+    return false;
+  }
+  return true;
 }
 
 static bool ParseSetFrameBlendsArg(const char* s, SetFrameBlendsArg* out) {
@@ -2038,6 +2172,7 @@ struct Args {
   SetFrameBlendsArg set_frame_blends;
   SetFrameDurationsArg set_frame_durations;
   SetFrameNamesArg set_frame_names;
+  SetFrameTypesArg set_frame_types;
   SetFrameRegionsArg set_frame_regions;
   jxltran::TocGroupOrderCli group_order = jxltran::TocGroupOrderCli::kKeep;
   int64_t center_x = -1;
@@ -2123,6 +2258,8 @@ struct Args {
   bool NeedsSetFrameDurations() const { return set_frame_durations.set; }
 
   bool NeedsSetFrameNames() const { return set_frame_names.set; }
+
+  bool NeedsSetFrameTypes() const { return set_frame_types.set; }
 
   bool NeedsSetFrameRegions() const { return set_frame_regions.set; }
 
@@ -2554,6 +2691,26 @@ struct Args {
         "--keep-listed-frames).",
         &set_frame_names, ParseSetFrameNamesArg);
     cmdline->AddOptionValue(
+        '\0', "set-frame-types", "INDEX:TYPE[:FIELD=N...][,INDEX:TYPE...]",
+        "Change the frame type of specific codestream frames. TYPE is one of:\n"
+        "    regular    : display frame (composited or is_last)\n"
+        "    ref_only   : saved to a reference slot but not displayed\n"
+        "    skip_prog  : like regular but used in progressive scans\n"
+        "LF frame conversions are not supported. Triggers a full frame-header\n"
+        "re-encode. Useful for debugging: turn a reference-only patch frame into\n"
+        "a regular frame to make its pixel content visible to decoders.\n"
+        "INDEX addresses the input codestream: this runs before\n"
+        "--keep-listed-frames, so a retyped frame may become the last kept one.\n"
+        "Conversions whose output could not be decoded are refused: a partial\n"
+        "frame whose reference slot a later frame still reads, a patch source\n"
+        "leaving ref_only, a frame with more than one pass entering it, or a\n"
+        "displayed frame needing blending the colour encoding cannot support.\n"
+        "A reference-only header carries no blending info, is_last, origin or\n"
+        "duration, so leaving that type invents defaults. Optional :FIELD=N\n"
+        "suffixes set them back -- last, sbct, blend, src, alpha, clamp, dur,\n"
+        "x0, y0 -- which is what --check_reversible emits to undo the change.",
+        &set_frame_types, ParseSetFrameTypesArg);
+    cmdline->AddOptionValue(
         '\0', "set-frame-region", "INDEX:WxH+X+Y[,INDEX:WxH+X+Y...]",
         "Reposition a regular or skip-progressive frame's display rectangle "
         "(WxH+X+Y in\n"
@@ -2786,7 +2943,8 @@ static bool InfoModeUsesNonDefaultOptions(const Args& a) {
          a.NeedsEpfIters() || a.NeedsEpfAmpScale() || a.NeedsEpfUniformity() ||
          a.NeedsOpsinAdjust() || a.opsin_inverse || a.NeedsSetFrameBlends() ||
          a.NeedsSetFrameDurations() || a.NeedsSetFrameNames() ||
-         a.NeedsSetFrameRegions() || a.append_jxl != nullptr ||
+         a.NeedsSetFrameTypes() || a.NeedsSetFrameRegions() ||
+         a.append_jxl != nullptr ||
          a.append_jxl_skip_compat_check || a.append_dummy_tail ||
          a.check_reversible;
 }
@@ -3087,6 +3245,21 @@ static void PrintJxlInfoStdout(const jxltran::ParsedCodestream& parsed) {
         printf("lf_global_scale: %" PRIuS " %u\n", i,
                static_cast<unsigned>(fu.lf_global_quantizer_global_scale));
       }
+      if (fu.lf_global_noise_lut_abs_valid) {
+        if (fu.lf_global_noise_raw_valid) {
+          std::array<float, jxltran::kNoiseLutPoints> lut;
+          jxltran::DecodeNoiseLutBits(fu.lf_global_noise_raw_bytes, &lut);
+          printf("noise_lut: %" PRIuS, i);
+          for (float v : lut) printf(" %.9g", static_cast<double>(v));
+          fputc('\n', stdout);
+          // Also print as 20 hex digits (the --set-photon-noise-weights format).
+          printf("noise_lut_hex: %" PRIuS " ", i);
+          for (uint8_t b : fu.lf_global_noise_raw_bytes) printf("%02x", b);
+          fputc('\n', stdout);
+        } else {
+          printf("noise_lut: %" PRIuS " none\n", i);
+        }
+      }
     }
   }
 }
@@ -3151,7 +3324,7 @@ int main(int argc, const char* argv[]) {
       !args.NeedsEpfIters() && !args.NeedsEpfAmpScale() &&
       !args.NeedsEpfUniformity() && !args.NeedsSetFrameBlends() &&
       !args.NeedsSetFrameDurations() && !args.NeedsSetFrameNames() &&
-      !args.NeedsSetFrameRegions()) {
+      !args.NeedsSetFrameTypes() && !args.NeedsSetFrameRegions()) {
     fprintf(stderr,
             "jxltran: --frames requires at least one of --gab-blur, "
             "--gab-sharpen, --gab-weights, --set-epf-iters, "
@@ -3160,7 +3333,7 @@ int main(int argc, const char* argv[]) {
             "--lf-dc-quant-mul, --lf-global-scale, "
             "--set-splines-from, --clear-splines-frames, "
             "--lf-global-chunk0-tail-trim-bytes, --set-frame-names, "
-            "--set-frame-region, or a\n"
+            "--set-frame-types, --set-frame-region, or a\n"
             "non-default --group_order\n");
     return 1;
   }
@@ -3574,7 +3747,8 @@ int main(int argc, const char* argv[]) {
       args.group_order != jxltran::TocGroupOrderCli::kKeep ||
       args.NeedsOpsinAdjust() || args.NeedsKeepListedFrames() ||
       args.NeedsSetFrameBlends() || args.NeedsSetFrameDurations() ||
-      args.NeedsSetFrameNames() || args.NeedsSetFrameRegions();
+      args.NeedsSetFrameNames() || args.NeedsSetFrameTypes() ||
+      args.NeedsSetFrameRegions();
   if (args.file_out && args.check_reversible && !needs_codestream_transform) {
     if (is_container) {
       if (!jxltran::ReassembleCodestream(boxes, &codestream_before_transform)) {
@@ -3930,6 +4104,24 @@ int main(int argc, const char* argv[]) {
         }
         if (toc_changed) wrote_anything = true;
       }
+      // Before --keep-listed-frames, so indices address input frames and a
+      // retyped frame can legally become the last kept one.
+      if (args.NeedsSetFrameTypes()) {
+        if (args.file_out) {
+          for (const auto& ch : args.set_frame_types.pairs) {
+            undo_rec.NoteFrameTypeBeforeChange(parsed, ch.frame_index);
+          }
+        }
+        if (!jxltran::ApplySetFrameTypes(&parsed, args.set_frame_types.pairs)) {
+          return false;
+        }
+        if (args.file_out && args.NeedsKeepListedFrames()) {
+          undo_rec.SetCodestreamNotReversible(
+              "--set-frame-types with --keep-listed-frames: undo frame "
+              "indices would refer to the pre-reorder codestream");
+        }
+        wrote_anything = true;
+      }
       const std::vector<size_t>& keep_order_sel =
           args.keep_frames.set ? args.keep_frames.indices_ordered
                                : args.frames.indices_ordered;
@@ -4030,6 +4222,10 @@ int main(int argc, const char* argv[]) {
           return false;
         }
         wrote_anything = true;
+      }
+      if (args.NeedsSetFrameTypes() &&
+          !jxltran::ValidateFrameTypesDecodable(parsed)) {
+        return false;
       }
       if (!wrote_anything) {
         return true;

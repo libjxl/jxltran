@@ -301,6 +301,49 @@ bool ApplySetFrameNames(
     const std::vector<std::pair<size_t, std::vector<uint8_t>>>&
         frame_index_name);
 
+// One --set-frame-types entry: the target type plus, optionally, header fields
+// to restore alongside it. A reference-only header carries no blending info,
+// is_last, origin or duration, so a conversion away from it invents defaults;
+// undo commands pass the original values back through these fields. They are
+// applied after the type change.
+struct FrameTypeChange {
+  size_t frame_index = 0;
+  uint32_t new_type = 0;
+  bool has_is_last = false;
+  bool is_last = false;
+  bool has_save_before_ct = false;
+  bool save_before_ct = false;
+  bool has_blend_mode = false;
+  uint32_t blend_mode = 0;
+  bool has_blend_source = false;
+  uint32_t blend_source = 0;
+  bool has_alpha_channel = false;
+  uint32_t alpha_channel = 0;
+  bool has_clamp = false;
+  bool clamp = false;
+  bool has_origin = false;
+  int32_t x0 = 0;
+  int32_t y0 = 0;
+  bool has_duration = false;
+  uint32_t duration = 0;
+};
+
+// Change frame type (kFrameType* constant). TYPE slugs: "regular", "ref_only",
+// "skip_prog". "lf" conversions are rejected. Triggers a full frame-header
+// re-encode (rf_reencode). The TOC and group data are copied verbatim, so the
+// conversion is only valid when num_passes stays 1 (the default for
+// reference-only frames). Conversions whose output could not be decoded are
+// rejected. Useful for debugging: turns a reference-only patch frame into a
+// regular frame so decoders display it.
+bool ApplySetFrameTypes(ParsedCodestream* cs,
+                        const std::vector<FrameTypeChange>& changes);
+
+// Checks the frame graph a --set-frame-types run would emit: a terminating
+// is_last frame, no partial reference-only frame whose slot is still read, and
+// no partial patch source that cannot declare save_before_ct. Runs after all
+// other operations, so frames dropped by --keep-frames no longer count.
+bool ValidateFrameTypesDecodable(const ParsedCodestream& cs);
+
 // When |ApplyKeepListedFrames| is a full permutation (every codestream frame
 // index 0..n-1 appears exactly once), optional |undo_out| records enough to
 // invert the reorder and restore |is_last| / |save_as_reference|.

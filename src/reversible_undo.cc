@@ -531,6 +531,44 @@ void UndoRecorder::NoteFrameNameBeforeChange(const ParsedCodestream& parsed,
   has_any_step_ = true;
 }
 
+namespace {
+
+const char* FrameTypeSlugForUndo(uint32_t t) {
+  switch (t) {
+    case kFrameTypeLF:
+      return "lf";
+    case kFrameTypeReferenceOnly:
+      return "ref_only";
+    case kFrameTypeSkipProgressive:
+      return "skip_prog";
+    default:
+      return "regular";
+  }
+}
+
+}  // namespace
+
+void UndoRecorder::NoteFrameTypeBeforeChange(const ParsedCodestream& parsed,
+                                             size_t frame_index) {
+  if (frame_index >= parsed.frames.size()) return;
+  const FrameHeader& fh = parsed.frames[frame_index].frame;
+  FrameTypeUndo u;
+  u.frame_index = frame_index;
+  u.old_type = fh.frame_type;
+  u.old_is_last = fh.is_last;
+  u.old_save_before_ct = fh.save_before_ct;
+  u.old_blend_mode = fh.blending_info.mode;
+  u.old_blend_source = fh.blending_info.source;
+  u.old_alpha_channel = fh.blending_info.alpha_channel;
+  u.old_clamp = fh.blending_info.clamp;
+  u.old_duration = fh.duration;
+  u.old_have_crop = fh.have_crop;
+  u.old_x0 = UnpackSigned(fh.ux0);
+  u.old_y0 = UnpackSigned(fh.uy0);
+  frame_type_undos_.push_back(u);
+  has_any_step_ = true;
+}
+
 void UndoRecorder::NoteSplinesAddedOnFrames(
     const std::vector<std::pair<size_t, int64_t>>& entries) {
   if (entries.empty()) return;
@@ -1091,6 +1129,35 @@ bool UndoRecorder::BuildUndoCommandLine(const char* argv0, const char* out_jxl,
     }
   }
 
+  if (!frame_type_undos_.empty()) {
+    cmd += " --set-frame-types=";
+    for (ssize_t i = static_cast<ssize_t>(frame_type_undos_.size()) - 1; i >= 0;
+         --i) {
+      const FrameTypeUndo& ft = frame_type_undos_[static_cast<size_t>(i)];
+      if (i != static_cast<ssize_t>(frame_type_undos_.size()) - 1) cmd += ',';
+      char buf[256];
+      snprintf(buf, sizeof(buf), "%" PRIuS ":%s", ft.frame_index,
+               FrameTypeSlugForUndo(ft.old_type));
+      cmd += buf;
+      if (ft.old_type == kFrameTypeReferenceOnly) {
+        // The only field a reference-only header carries that the other types
+        // cannot always express.
+        snprintf(buf, sizeof(buf), ":sbct=%d", ft.old_save_before_ct ? 1 : 0);
+        cmd += buf;
+      } else {
+        snprintf(buf, sizeof(buf),
+                 ":last=%d:blend=%u:src=%u:alpha=%u:clamp=%d:dur=%u",
+                 ft.old_is_last ? 1 : 0, ft.old_blend_mode, ft.old_blend_source,
+                 ft.old_alpha_channel, ft.old_clamp ? 1 : 0, ft.old_duration);
+        cmd += buf;
+        if (ft.old_have_crop) {
+          snprintf(buf, sizeof(buf), ":x0=%d:y0=%d", ft.old_x0, ft.old_y0);
+          cmd += buf;
+        }
+      }
+    }
+  }
+
   if (!blend_undos_.empty()) {
     std::vector<size_t> ord(blend_undos_.size());
     for (size_t i = 0; i < ord.size(); ++i) ord[i] = i;
@@ -1485,6 +1552,43 @@ ReversibleCheckStatus UndoRecorder::VerifyRoundtripCodestream(
       pairs.emplace_back(fn.frame_index, fn.old_name_utf8);
     }
     if (!ApplySetFrameNames(&parsed, pairs)) {
+      return ReversibleCheckStatus::kMismatch;
+    }
+  }
+
+  if (!frame_type_undos_.empty()) {
+    std::vector<FrameTypeChange> changes;
+    changes.reserve(frame_type_undos_.size());
+    for (ssize_t i = static_cast<ssize_t>(frame_type_undos_.size()) - 1; i >= 0;
+         --i) {
+      const FrameTypeUndo& ft = frame_type_undos_[static_cast<size_t>(i)];
+      FrameTypeChange ch;
+      ch.frame_index = ft.frame_index;
+      ch.new_type = ft.old_type;
+      ch.has_save_before_ct = true;
+      ch.save_before_ct = ft.old_save_before_ct;
+      if (ft.old_type != kFrameTypeReferenceOnly) {
+        ch.has_is_last = true;
+        ch.is_last = ft.old_is_last;
+        ch.has_blend_mode = true;
+        ch.blend_mode = ft.old_blend_mode;
+        ch.has_blend_source = true;
+        ch.blend_source = ft.old_blend_source;
+        ch.has_alpha_channel = true;
+        ch.alpha_channel = ft.old_alpha_channel;
+        ch.has_clamp = true;
+        ch.clamp = ft.old_clamp;
+        ch.has_duration = true;
+        ch.duration = ft.old_duration;
+        if (ft.old_have_crop) {
+          ch.has_origin = true;
+          ch.x0 = ft.old_x0;
+          ch.y0 = ft.old_y0;
+        }
+      }
+      changes.push_back(ch);
+    }
+    if (!ApplySetFrameTypes(&parsed, changes)) {
       return ReversibleCheckStatus::kMismatch;
     }
   }

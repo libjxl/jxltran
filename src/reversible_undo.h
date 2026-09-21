@@ -82,6 +82,10 @@ class UndoRecorder {
                                     uint32_t orient_before_header);
   void NoteFrameNameBeforeChange(const ParsedCodestream& parsed,
                                  size_t frame_index);
+  // Records the header fields --set-frame-types would drop, so the undo can
+  // pass them back. Call before ApplySetFrameTypes.
+  void NoteFrameTypeBeforeChange(const ParsedCodestream& parsed,
+                                 size_t frame_index);
 
   // |entries| lists (codestream frame index, forward |spline_edit_delta_bits|)
   // for each insert, in the same order as |ApplySplinesFromFile| applied blocks.
@@ -214,6 +218,22 @@ class UndoRecorder {
     std::vector<uint8_t> old_name_utf8;
   };
   std::vector<FrameNameUndo> frame_name_undos_;
+
+  struct FrameTypeUndo {
+    size_t frame_index = 0;
+    uint32_t old_type = 0;
+    bool old_is_last = false;
+    bool old_save_before_ct = false;
+    uint32_t old_blend_mode = 0;
+    uint32_t old_blend_source = 0;
+    uint32_t old_alpha_channel = 0;
+    bool old_clamp = false;
+    uint32_t old_duration = 0;
+    bool old_have_crop = false;
+    int32_t old_x0 = 0;
+    int32_t old_y0 = 0;
+  };
+  std::vector<FrameTypeUndo> frame_type_undos_;
 
   bool undo_orientation_ = false;
   bool undo_main_bit_depth_ = false;

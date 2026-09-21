@@ -62,6 +62,11 @@ struct LfGlobalThroughNoise {
   // 8×10-bit noise LUT begins (or would begin if kNoise were set).
   size_t noise_lut_start_bit = 0;
   std::optional<LfGlobalSplines> splines;
+  // Bit i set when the patch dictionary reads reference slot i. Such a slot
+  // must hold a frame saved before the colour transform (libjxl
+  // dec_patch_dictionary.cc: "Patches cannot use frames saved post color
+  // transforms").
+  uint32_t patch_ref_slot_mask = 0;
   // When kFrameFlagNoise, the verbatim 80-bit LUT read from the bitstream.
   bool noise_lut_bytes_valid = false;
   std::array<uint8_t, 10> noise_lut_bytes{};

@@ -2691,6 +2691,287 @@ bool ApplySetFrameNames(
   return true;
 }
 
+static bool FrameCoversCanvas(const FrameHeader& f, uint32_t canvas_w,
+                              uint32_t canvas_h) {
+  if (!f.have_crop) return true;
+  const int32_t x0 =
+      (f.frame_type != kFrameTypeReferenceOnly) ? UnpackSigned(f.ux0) : 0;
+  const int32_t y0 =
+      (f.frame_type != kFrameTypeReferenceOnly) ? UnpackSigned(f.uy0) : 0;
+  return x0 <= 0 && y0 <= 0 &&
+         x0 + static_cast<int32_t>(f.crop_width) >=
+             static_cast<int32_t>(canvas_w) &&
+         y0 + static_cast<int32_t>(f.crop_height) >=
+             static_cast<int32_t>(canvas_h);
+}
+
+// Index of the first later frame still consuming |index|'s reference slot, or
+// npos. A frame turned reference-only stores only its own rect instead of the
+// composited canvas, so such a consumer would no longer decode. Scanning stops
+// once a full-canvas frame refills the slot.
+static size_t FindReferenceSlotConsumer(const ParsedCodestream& cs,
+                                        size_t index) {
+  const uint32_t canvas_w = cs.image.size.width;
+  const uint32_t canvas_h = cs.image.size.height;
+  const uint32_t slot = cs.frames[index].frame.save_as_reference;
+  for (size_t j = index + 1; j < cs.frames.size(); ++j) {
+    const FrameHeader& later = cs.frames[j].frame;
+    if (later.frame_type == kFrameTypeLF) continue;
+    const bool full = FrameCoversCanvas(later, canvas_w, canvas_h);
+    // A full-canvas kReplace frame ignores its blending base entirely.
+    const bool reads_base = !(later.blending_info.mode == 0 && full);
+    if (reads_base && later.blending_info.source == slot) return j;
+    if ((cs.frames[j].lf_global_patch_ref_slot_mask & (1u << slot)) != 0) {
+      return j;
+    }
+    if (later.save_as_reference == slot && full) break;  // slot refilled
+  }
+  return static_cast<size_t>(-1);
+}
+
+// Index of the first later frame whose patch dictionary reads |index|'s
+// reference slot, or npos. Patch sources must be saved before the colour
+// transform, which only a reference-only or full-canvas frame can express.
+static size_t FindPatchConsumer(const ParsedCodestream& cs, size_t index) {
+  const uint32_t slot = cs.frames[index].frame.save_as_reference;
+  for (size_t j = index + 1; j < cs.frames.size(); ++j) {
+    if ((cs.frames[j].lf_global_patch_ref_slot_mask & (1u << slot)) != 0) {
+      return j;
+    }
+    const FrameHeader& later = cs.frames[j].frame;
+    const bool can_save = !later.is_last && later.frame_type != kFrameTypeLF &&
+                          (later.duration == 0 || later.save_as_reference != 0);
+    if (later.save_as_reference == slot && can_save) break;  // slot overwritten
+  }
+  return static_cast<size_t>(-1);
+}
+
+// save_before_ct as a decoder will see it: a reference-only header always
+// stores the flag, a normal one only when the frame resets the canvas, and
+// otherwise the decoder defaults it to false.
+static bool EffectiveSaveBeforeCt(const FrameHeader& fh, uint32_t canvas_w,
+                                  uint32_t canvas_h) {
+  if (fh.frame_type == kFrameTypeReferenceOnly) return fh.save_before_ct;
+  const bool resets_canvas = FrameCoversCanvas(fh, canvas_w, canvas_h) &&
+                             fh.blending_info.mode == 0;
+  const bool can_reference = !fh.is_last && fh.frame_type != kFrameTypeLF &&
+                             (fh.duration == 0 || fh.save_as_reference != 0);
+  return (resets_canvas && can_reference) ? fh.save_before_ct : false;
+}
+
+bool ValidateFrameTypesDecodable(const ParsedCodestream& cs) {
+  if (cs.frames.empty()) return true;
+  const uint32_t canvas_w = cs.image.size.width;
+  const uint32_t canvas_h = cs.image.size.height;
+
+  // A codestream ends at the frame carrying is_last; without one a decoder
+  // keeps waiting for frames that never come.
+  bool any_is_last = false;
+  for (const FramedUnit& fu : cs.frames) {
+    if (fu.frame.is_last) any_is_last = true;
+  }
+  if (!any_is_last) {
+    fprintf(stderr,
+            "jxltran: --set-frame-types: no frame is marked is_last, so the "
+            "codestream would have no final frame (reference-only frames can "
+            "never be last)\n");
+    return false;
+  }
+
+  // libjxl refuses to run a blending stage on an xyb-encoded image that
+  // carries its own ICC profile (stage_blending.cc: "Blending in unsupported
+  // color space"), so every displayed frame must avoid needing one.
+  const bool blending_unsupported =
+      cs.image.metadata.xyb_encoded &&
+      cs.image.metadata.colour_encoding.want_icc;
+  if (blending_unsupported) {
+    for (size_t i = 0; i < cs.frames.size(); ++i) {
+      const FrameHeader& fh = cs.frames[i].frame;
+      // Only a frame this run turned into a displayed one: a frame that
+      // already needed blending was already whatever it was.
+      if (!cs.frames[i].frame_type_changed ||
+          cs.frames[i].frame_type_before != kFrameTypeReferenceOnly) {
+        continue;
+      }
+      if (fh.frame_type != kFrameTypeRegular &&
+          fh.frame_type != kFrameTypeSkipProgressive) {
+        continue;
+      }
+      if (!fh.have_crop && fh.blending_info.mode == 0) continue;
+      fprintf(stderr,
+              "jxltran: --set-frame-types: frame %" PRIuS
+              " would be displayed and needs blending (%s), but this image is "
+              "xyb-encoded with its own ICC profile, which libjxl cannot blend "
+              "in; the output would not decode. A displayed frame here must "
+              "cover the canvas exactly with blend=replace -- to view this "
+              "frame on its own, add --keep-listed-frames --keep-frames=%" PRIuS
+              " --crop=%ux%u+0+0\n",
+              i, fh.have_crop ? "it does not cover the canvas" : "blend mode",
+              i, fh.have_crop ? fh.crop_width : canvas_w,
+              fh.have_crop ? fh.crop_height : canvas_h);
+      if (fh.have_crop) {
+        // Machine-readable retry hint for front ends (see web-demo).
+        fprintf(stderr, "jxltran: suggest-args: --crop=%ux%u+0+0\n",
+                fh.crop_width, fh.crop_height);
+      }
+      return false;
+    }
+  }
+
+  // libjxl cannot blend a post-colour-transform frame over a reference slot
+  // holding XYB pixels (stage_blending.cc: "Trying to blend XYB reference
+  // frame"). Only flag slots a retyped frame now fills, so pre-existing
+  // arrangements are left alone.
+  for (size_t j = 0; j < cs.frames.size(); ++j) {
+    const FrameHeader& fj = cs.frames[j].frame;
+    if (fj.frame_type != kFrameTypeRegular &&
+        fj.frame_type != kFrameTypeSkipProgressive) {
+      continue;
+    }
+    if (!fj.have_crop && fj.blending_info.mode == 0) continue;  // no blending
+    const uint32_t slot = fj.blending_info.source;
+    for (ssize_t k = static_cast<ssize_t>(j) - 1; k >= 0; --k) {
+      const size_t ki = static_cast<size_t>(k);
+      const FrameHeader& fk = cs.frames[ki].frame;
+      const bool can_save = !fk.is_last && fk.frame_type != kFrameTypeLF &&
+                            (fk.duration == 0 || fk.save_as_reference != 0);
+      if (!can_save || fk.save_as_reference != slot) continue;
+      if (cs.frames[ki].frame_type_changed &&
+          EffectiveSaveBeforeCt(fk, canvas_w, canvas_h)) {
+        fprintf(stderr,
+                "jxltran: --set-frame-types: frame %" PRIuS " blends over "
+                "reference slot %u, which frame %" PRIuS " now fills with XYB "
+                "(pre-colour-transform) pixels; libjxl cannot blend those and "
+                "the output would not decode. Every later frame blending from "
+                "slot %u has to be dropped or retyped as well.\n",
+                j, slot, ki, slot);
+        return false;
+      }
+      break;  // nearest earlier saver decides
+    }
+  }
+
+  for (size_t i = 0; i < cs.frames.size(); ++i) {
+    const FrameHeader& fh = cs.frames[i].frame;
+    if (!cs.frames[i].frame_type_changed) continue;
+    if (fh.frame_type == kFrameTypeLF) continue;
+    const bool covers = FrameCoversCanvas(fh, canvas_w, canvas_h);
+    if (covers) continue;
+
+    if (fh.frame_type == kFrameTypeReferenceOnly) {
+      // Stores only its own rect, so a later blend from that slot has no
+      // canvas-sized base to work from.
+      const size_t consumer = FindReferenceSlotConsumer(cs, i);
+      if (consumer != static_cast<size_t>(-1)) {
+        fprintf(stderr,
+                "jxltran: --set-frame-types: frame %" PRIuS " is not "
+                "full-canvas, so as a reference-only frame it stores only its "
+                "own %ux%u rect in reference slot %u, but frame %" PRIuS
+                " still reads that slot; the output would not decode\n",
+                i, fh.crop_width, fh.crop_height, fh.save_as_reference,
+                consumer);
+        return false;
+      }
+    } else if (!EffectiveSaveBeforeCt(fh, canvas_w, canvas_h)) {
+      // Patches require an XYB (pre-colour-transform) source, which a partial
+      // normal frame has no bitstream room to declare.
+      const size_t consumer = FindPatchConsumer(cs, i);
+      if (consumer != static_cast<size_t>(-1)) {
+        fprintf(stderr,
+                "jxltran: --set-frame-types: frame %" PRIuS " is a %ux%u patch "
+                "source for frame %" PRIuS " (reference slot %u). A partial "
+                "regular frame cannot be saved before the colour transform, "
+                "which patches require, so the output would not decode. Drop "
+                "frame %" PRIuS " too (e.g. --keep-frames=%" PRIuS ").\n",
+                i, fh.crop_width, fh.crop_height, consumer,
+                fh.save_as_reference, consumer, i);
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool ApplySetFrameTypes(ParsedCodestream* cs,
+                        const std::vector<FrameTypeChange>& changes) {
+  for (const auto& ch : changes) {
+    const std::pair<size_t, uint32_t> p(ch.frame_index, ch.new_type);
+    if (p.first >= cs->frames.size()) {
+      fprintf(stderr,
+              "jxltran: --set-frame-types: frame index %" PRIuS " out of range "
+              "(codestream has %" PRIuS " frames)\n",
+              p.first, cs->frames.size());
+      return false;
+    }
+    const uint32_t new_type = p.second;
+    if (new_type == kFrameTypeLF) {
+      fprintf(stderr,
+              "jxltran: --set-frame-types: cannot convert frame %" PRIuS " to lf "
+              "(lf frames have a different TOC structure)\n",
+              p.first);
+      return false;
+    }
+    FrameHeader& fh = cs->frames[p.first].frame;
+    if (fh.frame_type == kFrameTypeLF) {
+      fprintf(stderr,
+              "jxltran: --set-frame-types: cannot convert lf frame %" PRIuS
+              " to another type (different TOC structure)\n",
+              p.first);
+      return false;
+    }
+    if (fh.frame_type == new_type) continue;
+    if (!cs->frames[p.first].frame_type_changed) {
+      cs->frames[p.first].frame_type_changed = true;
+      cs->frames[p.first].frame_type_before = fh.frame_type;
+    }
+    const bool covers_canvas =
+        FrameCoversCanvas(fh, cs->image.size.width, cs->image.size.height);
+    if (new_type == kFrameTypeReferenceOnly) {
+      // A reference-only header stores no pass count, so a decoder assumes one
+      // pass and would read the wrong number of TOC entries.
+      if (fh.passes.num_passes != 1) {
+        fprintf(stderr,
+                "jxltran: --set-frame-types: frame %" PRIuS " has %u passes; "
+                "reference-only frames store no pass count, so its TOC could "
+                "not be read back\n",
+                p.first, fh.passes.num_passes);
+        return false;
+      }
+      // reference-only frames are never is_last.
+      fh.is_last = false;
+      // A reference-only frame stores no origin, so a decoder sees it at (0,0).
+      // libjxl rejects one smaller than the canvas unless it is saved before
+      // the colour transform; its own patch encoder always sets this.
+      if (!covers_canvas) fh.save_before_ct = true;
+    } else if (fh.have_crop && fh.crop_width == cs->image.size.width &&
+               fh.crop_height == cs->image.size.height &&
+               UnpackSigned(fh.ux0) == 0 && UnpackSigned(fh.uy0) == 0) {
+      // A displayed frame that exactly covers the canvas needs no crop bundle,
+      // and without one libjxl can skip blending (blending.cc NeedsBlending),
+      // which an xyb-encoded image with its own ICC profile cannot do at all.
+      fh.have_crop = false;
+    }
+    fh.frame_type = new_type;
+    fh.rf_reencode = true;
+    // Header fields a reference-only frame cannot carry, restored by undo.
+    if (ch.has_is_last) fh.is_last = ch.is_last;
+    if (ch.has_save_before_ct) fh.save_before_ct = ch.save_before_ct;
+    if (ch.has_blend_mode) fh.blending_info.mode = ch.blend_mode;
+    if (ch.has_blend_source) fh.blending_info.source = ch.blend_source;
+    if (ch.has_alpha_channel) {
+      fh.blending_info.alpha_channel = ch.alpha_channel;
+    }
+    if (ch.has_clamp) fh.blending_info.clamp = ch.clamp;
+    if (ch.has_duration) fh.duration = ch.duration;
+    if (ch.has_origin) {
+      fh.ux0 = PackSigned(ch.x0);
+      fh.uy0 = PackSigned(ch.y0);
+      fh.have_crop = true;
+    }
+  }
+  return true;
+}
+
 bool ApplyKeepListedFrames(ParsedCodestream* cs,
                            const std::vector<size_t>& frames_in_order,
                            bool* out_changed, KeepReorderUndoSpec* undo_out) {

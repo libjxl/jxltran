@@ -770,6 +770,7 @@ bool ReadCodestream(const uint8_t* data, size_t size, ParsedCodestream* out) {
                 const size_t lf0_abs =
                     pos * 8 + body_start_bit + sec0_off * 8;
                 fu.lf_global_noise_lut_abs_valid = true;
+                fu.lf_global_patch_ref_slot_mask = parsed.patch_ref_slot_mask;
                 fu.lf_global_noise_lut_rel_bit = parsed.noise_lut_start_bit;
                 fu.lf_global_noise_lut_abs_bit =
                     lf0_abs + parsed.noise_lut_start_bit;
@@ -854,7 +855,8 @@ bool WriteCodestream(const ParsedCodestream& cs, const uint8_t* original,
   size_t wframe = 0;
   for (const FramedUnit& fu : cs.frames) {
     const uint32_t ft = fu.frame.frame_type;
-    if (ft == kFrameTypeLF || ft == kFrameTypeReferenceOnly) {
+    if ((ft == kFrameTypeLF || ft == kFrameTypeReferenceOnly) &&
+        !fu.frame.rf_reencode) {
       if (TraceIsOn()) {
         TraceMarkerAt(
             bw.bit_pos(), "write.codestream.frame_verbatim",

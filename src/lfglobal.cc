@@ -85,7 +85,8 @@ inline bool PatchUsesClamp(uint32_t mode) {
 bool SkipPatchDictionary(
     BitReader& br, size_t xsize_padded, size_t ysize_padded,
     size_t num_extra_channels,
-    const std::array<std::pair<size_t, size_t>, kNumReferenceSlots>& ref_slots) {
+    const std::array<std::pair<size_t, size_t>, kNumReferenceSlots>& ref_slots,
+    uint32_t* ref_slot_mask) {
   EntropyCoder ec{};
   if (!InitEntropyCoder(br, kNumPatchDictionaryContexts, false, &ec)) {
     return false;
@@ -115,6 +116,7 @@ bool SkipPatchDictionary(
     if (ref >= kNumReferenceSlots) {
       return false;
     }
+    if (ref_slot_mask != nullptr) *ref_slot_mask |= 1u << ref;
     const size_t ref_w = ref_slots[ref].first;
     const size_t ref_h = ref_slots[ref].second;
     if (ref_w == 0 || ref_h == 0) {
@@ -396,7 +398,8 @@ bool ReadLfGlobalThroughNoise(
     if (!LfGlobalPaddedPatchCanvas(fh, meta, canvas_w, canvas_h, &xp, &yp)) {
       return false;
     }
-    if (!SkipPatchDictionary(br, xp, yp, meta.num_extra, ref_slots)) {
+    if (!SkipPatchDictionary(br, xp, yp, meta.num_extra, ref_slots,
+                             &out->patch_ref_slot_mask)) {
       return false;
     }
   }

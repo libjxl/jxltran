@@ -81,6 +81,14 @@ struct FramedUnit {
   // Offset in bits from the start of the LF-global TOC section to the first bit
   // of the 80-bit LUT (or insert point when adding noise). Set with abs_valid.
   size_t lf_global_noise_lut_rel_bit = 0;
+  // Bit i set when this frame's patch dictionary reads reference slot i. Only
+  // meaningful when |lf_global_noise_lut_abs_valid| (the prefix parsed).
+  uint32_t lf_global_patch_ref_slot_mask = 0;
+  // Set by ApplySetFrameTypes on the frames it retyped, with the type they had
+  // before. Travels with the frame through --keep-listed-frames so the
+  // post-pipeline validation can blame only what this run changed.
+  bool frame_type_changed = false;
+  uint32_t frame_type_before = 0;
   // Verbatim 80-bit LUT read at ReadCodestream time when kFrameFlagNoise (for
   // lossless undo / --set-photon-noise-weights round-trips).
   bool lf_global_noise_raw_valid = false;
