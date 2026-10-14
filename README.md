@@ -112,8 +112,9 @@ Choose **which codestream frames** are kept and in **which order**, optionally *
 | `--append-jxl` | `FILE` | After `INPUT`, append frames from another codestream; needs `OUTPUT` and header compatibility. |
 | `--append-jxl-skip-compat-check` | — | With **`--append-jxl`**: skip compatibility check (unsafe). |
 | `--append-dummy-tail` | — | Append a fixed minimal terminal frame after `INPUT` (alternative to **`--append-jxl`**); needs `OUTPUT`. |
-| `--group_order` | `keep` \| `0` \| `1` \| `progressive` | TOC: leave as-is; strip permutation (`0`); **center-first AC order (`1`, matches cjxl)**; or strip only when stream order is non-progressive. |
-| `--center_x`, `--center_y` | `X`, `Y` | With `--group_order=1`: spiral center in pixels (`-1` = image center). Ignored otherwise. |
+| `--group_order` | `keep` \| `0` \| `1` \| `progressive` \| `custom` | TOC: leave as-is; strip permutation (`0`); **center-first AC order (`1`, matches cjxl)**; strip only when stream order is non-progressive; or a custom AC order from `--group_order_list`. |
+| `--group_order_list` | `G[,G...]` | Custom AC load order: raster group indices loaded first, in this order, in every pass; unlisted groups follow center-first. LF data stays in front. Implies `--group_order=custom`. |
+| `--center_x`, `--center_y` | `X`, `Y` | With `--group_order=1` or `custom`: spiral center in pixels (`-1` = image center). Ignored otherwise. |
 
 ### Per-frame signal: blending, timing, layout, restoration
 

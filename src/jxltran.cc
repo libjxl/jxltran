@@ -1851,9 +1851,46 @@ static bool ParseGroupOrder(const char* s, jxltran::TocGroupOrderCli* out) {
     *out = jxltran::TocGroupOrderCli::kProgressive;
     return true;
   }
+  if (strcmp(s, "custom") == 0) {
+    *out = jxltran::TocGroupOrderCli::kCustom;
+    return true;
+  }
   fprintf(stderr,
-          "jxltran: --group_order expects keep|0|1|progressive, got '%s'\n", s);
+          "jxltran: --group_order expects keep|0|1|progressive|custom, got "
+          "'%s'\n",
+          s);
   return false;
+}
+
+struct GroupOrderListArg {
+  bool set = false;
+  std::vector<size_t> groups;
+};
+
+static bool ParseGroupOrderList(const char* s, GroupOrderListArg* out) {
+  out->set = true;
+  out->groups.clear();
+  const char* p = s;
+  while (p != nullptr && *p != '\0') {
+    while (*p == ' ' || *p == ',') ++p;
+    if (*p == '\0') break;
+    char* end = nullptr;
+    const unsigned long long v = strtoull(p, &end, 10);
+    if (end == p || *p == '-') {
+      fprintf(stderr,
+              "jxltran: --group_order_list expects comma-separated AC group "
+              "indices, got '%s'\n",
+              s);
+      return false;
+    }
+    out->groups.push_back(static_cast<size_t>(v));
+    p = end;
+  }
+  if (out->groups.empty()) {
+    fprintf(stderr, "jxltran: --group_order_list is empty\n");
+    return false;
+  }
+  return true;
 }
 
 static bool ParseCenterI64(const char* s, int64_t* out) {
@@ -2175,6 +2212,7 @@ struct Args {
   SetFrameTypesArg set_frame_types;
   SetFrameRegionsArg set_frame_regions;
   jxltran::TocGroupOrderCli group_order = jxltran::TocGroupOrderCli::kKeep;
+  GroupOrderListArg group_order_list;
   int64_t center_x = -1;
   int64_t center_y = -1;
   PhotonIsoArg photon_iso;
@@ -2725,7 +2763,7 @@ struct Args {
     cmdline->AddHelpText(
         "\nCodestream signal (TOC, noise, filtering, splines):", 0);
     cmdline->AddOptionValue(
-        '\0', "group_order", "keep|0|1|progressive",
+        '\0', "group_order", "keep|0|1|progressive|custom",
         "TOC section order in regular / skip-progressive frames.\n"
         "    keep         : leave permutation and sizes unchanged.\n"
         "    0            : strip TOC permutation (logical order in the "
@@ -2739,8 +2777,21 @@ struct Args {
         "signaled),\n"
         "                   strip permutation like 0; otherwise keep (e.g. "
         "center-first\n"
-        "                   order that still signals all LF data before HF).",
+        "                   order that still signals all LF data before HF).\n"
+        "    custom       : AC groups in the order given by "
+        "--group_order_list (implied\n"
+        "                   by that option).",
         &group_order, ParseGroupOrder);
+    cmdline->AddOptionValue(
+        '\0', "group_order_list", "G[,G...]",
+        "AC group load order: raster group indices (row-major), loaded first "
+        "in this order\n"
+        "in every pass. Groups not listed follow in center-first order (see "
+        "--center_x /\n"
+        "--center_y). LF data stays in front, so the frame remains "
+        "progressively decodable.\n"
+        "Implies --group_order=custom.",
+        &group_order_list, ParseGroupOrderList);
     cmdline->AddOptionValue(
         '\0', "center_x", "X",
         "With --group_order=1, image X coordinate (pixels) for the center used "
@@ -3302,6 +3353,20 @@ int main(int argc, const char* argv[]) {
   if (cmdline.HelpFlagPassed() || !args.file_in) {
     cmdline.PrintHelp();
     return 0;
+  }
+  if (args.group_order_list.set) {
+    if (args.group_order != jxltran::TocGroupOrderCli::kKeep &&
+        args.group_order != jxltran::TocGroupOrderCli::kCustom) {
+      fprintf(stderr,
+              "jxltran: --group_order_list only goes with --group_order=custom "
+              "(or no --group_order)\n");
+      return 1;
+    }
+    args.group_order = jxltran::TocGroupOrderCli::kCustom;
+  } else if (args.group_order == jxltran::TocGroupOrderCli::kCustom) {
+    fprintf(stderr,
+            "jxltran: --group_order=custom needs --group_order_list=G,G,...\n");
+    return 1;
   }
   const bool meta_extract = args.extract_exif != nullptr ||
                             args.extract_xmp != nullptr ||
@@ -4095,8 +4160,9 @@ int main(int argc, const char* argv[]) {
         }
         bool toc_changed = false;
         if (!jxltran::ApplyTocGroupOrder(&parsed, args.group_order, args.center_x,
-                                        args.center_y, frame_sel,
-                                        &toc_changed)) {
+                                        args.center_y,
+                                        &args.group_order_list.groups,
+                                        frame_sel, &toc_changed)) {
           return false;
         }
         if (args.file_out) {

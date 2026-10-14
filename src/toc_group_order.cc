@@ -126,6 +126,8 @@ static constexpr double kPi = 3.1415926535897932384626433832795;
 // to stream position perm_move[src] (same convention as libjxl PermuteGroups).
 static bool BuildLibjxlMovePermutation(const FrameTocMetrics& tm, int64_t center_x,
                                      int64_t center_y,
+                                     const std::vector<size_t>* custom_ac_order,
+                                     size_t frame_index,
                                      std::vector<size_t>* perm_move) {
   perm_move->clear();
   const size_t ndc = tm.num_dc_groups;
@@ -195,6 +197,36 @@ static bool BuildLibjxlMovePermutation(const FrameTocMetrics& tm, int64_t center
   std::sort(ac_order.begin(), ac_order.end(),
             [&](size_t a, size_t b) { return distance_key(a) < distance_key(b); });
 
+  if (custom_ac_order != nullptr) {
+    std::vector<bool> listed(ng, false);
+    std::vector<size_t> custom;
+    custom.reserve(ng);
+    for (size_t gid : *custom_ac_order) {
+      if (gid >= ng) {
+        fprintf(stderr,
+                "jxltran: --group_order_list: group %" PRIuS
+                " is out of range for frame %" PRIuS " (%" PRIuS " AC groups, "
+                "%" PRIuS "x%" PRIuS "); use --frames=N to reorder only the "
+                "frame the list was made for\n",
+                gid, frame_index, ng, tm.xsize_groups,
+                ng / (tm.xsize_groups ? tm.xsize_groups : 1));
+        return false;
+      }
+      if (listed[gid]) {
+        fprintf(stderr,
+                "jxltran: --group_order_list: group %" PRIuS " is listed twice\n",
+                gid);
+        return false;
+      }
+      listed[gid] = true;
+      custom.push_back(gid);
+    }
+    for (size_t gid : ac_order) {
+      if (!listed[gid]) custom.push_back(gid);
+    }
+    ac_order = std::move(custom);
+  }
+
   std::vector<size_t> inv_ac(ng, 0);
   for (size_t i = 0; i < ac_order.size(); ++i) {
     inv_ac[ac_order[i]] = i;
@@ -222,7 +254,8 @@ static bool BuildLibjxlMovePermutation(const FrameTocMetrics& tm, int64_t center
 
 static bool ApplyCenterFirstOnFrame(FramedUnit* fu, const FrameTocMetrics& tm,
                                     int64_t center_x, int64_t center_y,
-                                    bool* mutated) {
+                                    const std::vector<size_t>* custom_ac_order,
+                                    size_t frame_index, bool* mutated) {
   fu->toc_body_stream_shuffle.clear();
   fu->toc_body_shuffle_src_sizes.clear();
 
@@ -232,20 +265,21 @@ static bool ApplyCenterFirstOnFrame(FramedUnit* fu, const FrameTocMetrics& tm,
   const size_t n = fu->toc_decoded_sizes.size();
   if (n == 0 || n != tm.num_toc_entries) {
     fprintf(stderr,
-            "jxltran: --group_order=1: TOC size mismatch (got %" PRIuS
+            "jxltran: --group_order: TOC size mismatch (got %" PRIuS
             ", expected %" PRIuS ")\n",
             fu->toc_decoded_sizes.size(), tm.num_toc_entries);
     return false;
   }
   if (fu->toc_strip_perm_reorder) {
     fprintf(stderr,
-            "jxltran: --group_order=1 cannot combine with another TOC strip on "
+            "jxltran: --group_order cannot combine with another TOC strip on "
             "the same frame.\n");
     return false;
   }
 
   std::vector<size_t> perm_move;
-  if (!BuildLibjxlMovePermutation(tm, center_x, center_y, &perm_move)) {
+  if (!BuildLibjxlMovePermutation(tm, center_x, center_y, custom_ac_order,
+                                  frame_index, &perm_move)) {
     return false;
   }
   if (perm_move.empty()) {
@@ -259,7 +293,7 @@ static bool ApplyCenterFirstOnFrame(FramedUnit* fu, const FrameTocMetrics& tm,
   for (size_t logical = 0; logical < n; ++logical) {
     const size_t d = perm_move[logical];
     if (d >= n || logical_at_target_stream[d] != n) {
-      fprintf(stderr, "jxltran: --group_order=1: invalid move permutation\n");
+      fprintf(stderr, "jxltran: --group_order: invalid move permutation\n");
       return false;
     }
     logical_at_target_stream[d] = logical;
@@ -284,13 +318,13 @@ static bool ApplyCenterFirstOnFrame(FramedUnit* fu, const FrameTocMetrics& tm,
   for (size_t new_s = 0; new_s < n; ++new_s) {
     const size_t logical = logical_at_target_stream[new_s];
     if (logical >= n) {
-      fprintf(stderr, "jxltran: --group_order=1: invalid move permutation\n");
+      fprintf(stderr, "jxltran: --group_order: invalid move permutation\n");
       return false;
     }
     const size_t old_s = old_stream_for_logical(logical);
     if (old_s >= n) {
       fprintf(stderr,
-              "jxltran: --group_order=1: could not map logical %" PRIuS
+              "jxltran: --group_order: could not map logical %" PRIuS
               " to a stream slot\n",
               logical);
       return false;
@@ -323,7 +357,7 @@ static bool ApplyCenterFirstOnFrame(FramedUnit* fu, const FrameTocMetrics& tm,
   if (!ShuffleBodyStreamSizesAsInOriginal(*fu, src_sizes,
                                            &fu->toc_body_shuffle_src_sizes)) {
     fprintf(stderr,
-            "jxltran: --group_order=1: could not derive stream chunk sizes from "
+            "jxltran: --group_order: could not derive stream chunk sizes from "
             "source codestream (pending photon/spline LF-global edit?)\n");
     return false;
   }
@@ -368,6 +402,7 @@ bool TocStreamOrderLooksProgressive(const FramedUnit& fu,
 
 bool ApplyTocGroupOrder(ParsedCodestream* cs, TocGroupOrderCli order,
                         int64_t center_x, int64_t center_y,
+                        const std::vector<size_t>* custom_ac_order,
                         const std::vector<size_t>* only_frames,
                         bool* any_mutation) {
   if (any_mutation != nullptr) *any_mutation = false;
@@ -394,9 +429,13 @@ bool ApplyTocGroupOrder(ParsedCodestream* cs, TocGroupOrderCli order,
       continue;
     }
 
-    if (order == TocGroupOrderCli::kCenterFirst) {
+    if (order == TocGroupOrderCli::kCenterFirst ||
+        order == TocGroupOrderCli::kCustom) {
+      const std::vector<size_t>* custom =
+          order == TocGroupOrderCli::kCustom ? custom_ac_order : nullptr;
       bool m = false;
-      if (!ApplyCenterFirstOnFrame(&fu, tm, center_x, center_y, &m)) {
+      if (!ApplyCenterFirstOnFrame(&fu, tm, center_x, center_y, custom, fi,
+                                   &m)) {
         return false;
       }
       if (m && any_mutation != nullptr) {

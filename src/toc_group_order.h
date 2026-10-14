@@ -24,6 +24,7 @@ enum class TocGroupOrderCli {
   kCanonical,    // 0: strip TOC permutation (logical stream order)
   kCenterFirst,  // 1: center-first AC group order (matches cjxl --group_order=1)
   kProgressive,  // normalize only when HF data appears before all LF groups
+  kCustom,       // caller-supplied AC group order; the rest follow center-first
 };
 
 bool TocStreamOrderLooksProgressive(const FramedUnit& fu,
@@ -54,10 +55,15 @@ bool CaptureTocSnapshotsBeforeGroupOrder(const ParsedCodestream& cs,
 // kCanonical strips permutation; kProgressive strips only when not
 // TocStreamOrderLooksProgressive. kCenterFirst reorders stream-order TOC sections
 // to libjxl center-first layout (see |center_x| / |center_y|, default image center).
+// kCustom puts the AC groups listed in |custom_ac_order| (raster group ids,
+// same order for every pass) first and the remaining ones after them in
+// center-first order; LF global, LF groups and HF global keep their canonical
+// place up front so the frame stays progressively decodable.
 // When |any_mutation| is non-null, sets *any_mutation true if any frame was
 // modified.
 bool ApplyTocGroupOrder(ParsedCodestream* cs, TocGroupOrderCli order,
                         int64_t center_x, int64_t center_y,
+                        const std::vector<size_t>* custom_ac_order,
                         const std::vector<size_t>* only_frames,
                         bool* any_mutation);
 
